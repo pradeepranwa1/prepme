@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-os.environ["OPENAI_API_KEY"] = "test"
+# os.environ["OPENAI_API_KEY"] = "test"
 
 app = FastAPI(title="Book Q&A API")
 
