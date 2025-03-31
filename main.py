@@ -1,18 +1,18 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
-from typing import Optional, List
 import PyPDF2
 from pathlib import Path
 import chromadb
 from chromadb.config import Settings
 import shutil
 import re
-from sentence_transformers import SentenceTransformer
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from dotenv import load_dotenv
+from utils.prompt_utils import split_into_sentences, create_chunks, get_embeddings
+from utils.s3_utils import upload_file_to_s3, check_file_in_s3
 
 # Load environment variables
 load_dotenv()
@@ -40,8 +40,7 @@ chroma_client = chromadb.Client(Settings(
     is_persistent=True
 ))
 
-# Initialize the sentence transformer model
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+
 
 # Initialize OpenAI LLM
 llm = ChatOpenAI(
@@ -68,42 +67,6 @@ prompt_template = PromptTemplate(
 # Create LLM chain
 llm_chain = LLMChain(llm=llm, prompt=prompt_template)
 
-def split_into_sentences(text: str) -> List[str]:
-    """Split text into sentences using regex pattern."""
-    # This pattern handles common sentence endings including Mr., Mrs., Dr., etc.
-    sentence_pattern = r'(?<=[.!?])\s+(?=[A-Z])'
-    sentences = re.split(sentence_pattern, text)
-    return [s.strip() for s in sentences if s.strip()]
-
-def create_chunks(sentences: List[str], max_chunk_size: int = 1000) -> List[str]:
-    """Create chunks of text while preserving sentence boundaries."""
-    chunks = []
-    current_chunk = []
-    current_size = 0
-    
-    for sentence in sentences:
-        sentence_size = len(sentence)
-        
-        # If adding this sentence would exceed max_chunk_size and we already have content,
-        # start a new chunk
-        if current_size + sentence_size > max_chunk_size and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_size = 0
-        
-        current_chunk.append(sentence)
-        current_size += sentence_size
-    
-    # Add the last chunk if it exists
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-    
-    return chunks
-
-def get_embeddings(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings for a list of texts using sentence-transformers."""
-    embeddings = embedding_model.encode(texts)
-    return embeddings.tolist()
 
 @app.post("/upload-book/")
 async def upload_book(file: UploadFile = File(...)):
@@ -114,6 +77,12 @@ async def upload_book(file: UploadFile = File(...)):
     file_path = UPLOAD_DIR / file.filename
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    
+    if check_file_in_s3(file.filename):
+        raise HTTPException(status_code=400, detail="File already exists in S3")
+
+    # Upload file to S3 using utility function"""
+    file_url = upload_file_to_s3(file.file, file.filename)
     
     # Process the PDF
     try:
@@ -151,7 +120,8 @@ async def upload_book(file: UploadFile = File(...)):
         return {
             "message": "Book processed successfully",
             "filename": file.filename,
-            "total_chunks": len(chunks)
+            "total_chunks": len(chunks),
+            "url": file_url
         }
     
     except Exception as e:
@@ -202,4 +172,4 @@ async def list_books():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
