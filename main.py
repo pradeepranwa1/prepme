@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import PyPDF2
@@ -13,6 +13,9 @@ from langchain.chains import LLMChain
 from dotenv import load_dotenv
 from utils.prompt_utils import split_into_sentences, create_chunks, get_embeddings
 from utils.s3_utils import upload_file_to_s3, check_file_in_s3
+from pydantic import BaseModel
+from utils.auth_utils import hash_password, verify_password, create_access_token, decode_access_token
+from datetime import timedelta
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +36,17 @@ app.add_middleware(
 # Create uploads directory if it doesn't exist
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Dummy database (replace with actual DB)
+fake_users_db = {}
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
 
 # Initialize ChromaDB client
 chroma_client = chromadb.Client(Settings(
@@ -66,6 +80,29 @@ prompt_template = PromptTemplate(
 
 # Create LLM chain
 llm_chain = LLMChain(llm=llm, prompt=prompt_template)
+
+@app.post("/register")
+def register(user: UserCreate):
+    if user.username in fake_users_db:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    fake_users_db[user.username] = hash_password(user.password)
+    return {"message": "User registered successfully"}
+
+@app.post("/login")
+def login(user: UserLogin):
+    if user.username not in fake_users_db or not verify_password(user.password, fake_users_db[user.username]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token = create_access_token({"sub": user.username}, expires_delta=timedelta(minutes=30))
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.get("/protected")
+def protected_route(token: str = Depends(decode_access_token)):
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    return {"message": "You have access!", "user": token["sub"]}
 
 
 @app.post("/upload-book/")
