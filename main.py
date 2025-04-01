@@ -17,6 +17,9 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Set tokenizers parallelism to false to avoid warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 app = FastAPI(title="Book Q&A API")
 
 # Add CORS middleware
@@ -175,8 +178,7 @@ async def ask_question(book_name: str, question: str):
         context = "\n".join(results['documents'][0])
         
         # Generate answer using LLM
-        answer = llm_chain.run(context=context, question=question)
-        print("hehe\ns,d\n")
+        answer = llm_chain.invoke({"context": context, "question": question})["text"]
         
         return {
             "question": question,
