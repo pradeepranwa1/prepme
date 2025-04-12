@@ -6,7 +6,6 @@ from pathlib import Path
 import chromadb
 from chromadb.config import Settings
 import shutil
-import re
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
@@ -16,6 +15,8 @@ from utils.s3_utils import upload_file_to_s3, check_file_in_s3
 from pydantic import BaseModel
 from utils.auth_utils import hash_password, verify_password, create_access_token, decode_access_token
 from datetime import timedelta
+from database import SessionLocal, User, get_db
+from sqlalchemy.orm import Session
 
 # Load environment variables
 load_dotenv()
@@ -38,12 +39,11 @@ app.add_middleware(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# Dummy database (replace with actual DB)
-fake_users_db = {}
-
 class UserCreate(BaseModel):
     username: str
     password: str
+    email: str
+    full_name: str
 
 class UserLogin(BaseModel):
     username: str
@@ -54,8 +54,6 @@ chroma_client = chromadb.Client(Settings(
     persist_directory="db",
     is_persistent=True
 ))
-
-
 
 # Initialize OpenAI LLM
 llm = ChatOpenAI(
@@ -83,16 +81,39 @@ prompt_template = PromptTemplate(
 llm_chain = LLMChain(llm=llm, prompt=prompt_template)
 
 @app.post("/register")
-def register(user: UserCreate):
-    if user.username in fake_users_db:
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    # Check if username already exists
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if db_user:
         raise HTTPException(status_code=400, detail="Username already taken")
     
-    fake_users_db[user.username] = hash_password(user.password)
-    return {"message": "User registered successfully"}
+    # Check if email already exists
+    db_user = db.query(User).filter(User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create new user
+    hashed_password = hash_password(user.password)
+    db_user = User(
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        hashed_password=hashed_password
+    )
+    
+    try:
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return {"message": "User registered successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/login")
-def login(user: UserLogin):
-    if user.username not in fake_users_db or not verify_password(user.password, fake_users_db[user.username]):
+def login(user: UserLogin, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     token = create_access_token({"sub": user.username}, expires_delta=timedelta(minutes=30))
@@ -104,7 +125,6 @@ def protected_route(token: str = Depends(decode_access_token)):
         raise HTTPException(status_code=401, detail="Invalid token")
     
     return {"message": "You have access!", "user": token["sub"]}
-
 
 @app.post("/upload-book/")
 async def upload_book(file: UploadFile = File(...)):

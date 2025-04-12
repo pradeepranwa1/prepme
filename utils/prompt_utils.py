@@ -1,4 +1,5 @@
 from typing import Optional, List
+import re
 from sentence_transformers import SentenceTransformer
 # Initialize the sentence transformer model
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
