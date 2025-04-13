@@ -12,7 +12,7 @@ def upload_file_to_s3(file_obj, object_name: str):
     """Uploads a file to S3 and returns the file URL"""
     try:
         s3_client.upload_fileobj(file_obj, AWS_S3_BUCKET, object_name)
-        return f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/books/{object_name}"
+        return f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{object_name}"
     except NoCredentialsError:
         return "AWS credentials not found!"
     
@@ -30,12 +30,12 @@ def check_file_in_s3(file_key: str) -> bool:
             return False
         raise  # Re-raise the exception if it's not a 404 error
 
-def generate_presigned_url(file_name: str, expiration: int = 3600):
+def generate_presigned_url(file_key: str, expiration: int = 3600):
     """Generates a pre-signed URL for downloading a file"""
     try:
         url = s3_client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": AWS_S3_BUCKET, "Key": f"books/{file_name}"},
+            Params={"Bucket": AWS_S3_BUCKET, "Key": file_key"},
             ExpiresIn=expiration,
         )
         return url

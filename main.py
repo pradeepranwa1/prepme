@@ -136,11 +136,11 @@ async def upload_book(file: UploadFile = File(...)):
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
-    if check_file_in_s3(file.filename):
+    if check_file_in_s3(f"books/{file.filename}"):
         raise HTTPException(status_code=400, detail="File already exists in S3")
 
     # Upload file to S3 using utility function"""
-    file_url = upload_file_to_s3(file.file, file.filename)
+    file_url = upload_file_to_s3(file.file, f"books/{file.filename}")
     
     # Process the PDF
     try:
