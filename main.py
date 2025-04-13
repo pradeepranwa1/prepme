@@ -1,18 +1,22 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 import os
-from typing import Optional, List
 import PyPDF2
 from pathlib import Path
 import chromadb
 from chromadb.config import Settings
 import shutil
-import re
-from sentence_transformers import SentenceTransformer
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from dotenv import load_dotenv
+from utils.prompt_utils import split_into_sentences, create_chunks, get_embeddings
+from utils.s3_utils import upload_file_to_s3, check_file_in_s3
+from pydantic import BaseModel
+from utils.auth_utils import hash_password, verify_password, create_access_token, decode_access_token
+from datetime import timedelta
+from database import SessionLocal, User, get_db
+from sqlalchemy.orm import Session
 
 # Load environment variables
 load_dotenv()
@@ -35,14 +39,21 @@ app.add_middleware(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    email: str
+    full_name: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
 # Initialize ChromaDB client
 chroma_client = chromadb.Client(Settings(
     persist_directory="db",
     is_persistent=True
 ))
-
-# Initialize the sentence transformer model
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # Initialize OpenAI LLM
 llm = ChatOpenAI(
@@ -69,42 +80,51 @@ prompt_template = PromptTemplate(
 # Create LLM chain
 llm_chain = LLMChain(llm=llm, prompt=prompt_template)
 
-def split_into_sentences(text: str) -> List[str]:
-    """Split text into sentences using regex pattern."""
-    # This pattern handles common sentence endings including Mr., Mrs., Dr., etc.
-    sentence_pattern = r'(?<=[.!?])\s+(?=[A-Z])'
-    sentences = re.split(sentence_pattern, text)
-    return [s.strip() for s in sentences if s.strip()]
+@app.post("/register")
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    # Check if username already exists
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    # Check if email already exists
+    db_user = db.query(User).filter(User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create new user
+    hashed_password = hash_password(user.password)
+    db_user = User(
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        hashed_password=hashed_password
+    )
+    
+    try:
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return {"message": "User registered successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
-def create_chunks(sentences: List[str], max_chunk_size: int = 1000) -> List[str]:
-    """Create chunks of text while preserving sentence boundaries."""
-    chunks = []
-    current_chunk = []
-    current_size = 0
+@app.post("/login")
+def login(user: UserLogin, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if not db_user or not verify_password(user.password, db_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    for sentence in sentences:
-        sentence_size = len(sentence)
-        
-        # If adding this sentence would exceed max_chunk_size and we already have content,
-        # start a new chunk
-        if current_size + sentence_size > max_chunk_size and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_size = 0
-        
-        current_chunk.append(sentence)
-        current_size += sentence_size
-    
-    # Add the last chunk if it exists
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-    
-    return chunks
+    token = create_access_token({"sub": user.username}, expires_delta=timedelta(minutes=30))
+    return {"access_token": token, "token_type": "bearer"}
 
-def get_embeddings(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings for a list of texts using sentence-transformers."""
-    embeddings = embedding_model.encode(texts)
-    return embeddings.tolist()
+@app.get("/protected")
+def protected_route(token: str = Depends(decode_access_token)):
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    return {"message": "You have access!", "user": token["sub"]}
 
 @app.post("/upload-book/")
 async def upload_book(file: UploadFile = File(...)):
@@ -115,6 +135,12 @@ async def upload_book(file: UploadFile = File(...)):
     file_path = UPLOAD_DIR / file.filename
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    
+    if check_file_in_s3(f"books/{file.filename}"):
+        raise HTTPException(status_code=400, detail="File already exists in S3")
+
+    # Upload file to S3 using utility function"""
+    file_url = upload_file_to_s3(file.file, f"books/{file.filename}")
     
     # Process the PDF
     try:
@@ -152,7 +178,8 @@ async def upload_book(file: UploadFile = File(...)):
         return {
             "message": "Book processed successfully",
             "filename": file.filename,
-            "total_chunks": len(chunks)
+            "total_chunks": len(chunks),
+            "url": file_url
         }
     
     except Exception as e:
@@ -202,4 +229,4 @@ async def list_books():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
