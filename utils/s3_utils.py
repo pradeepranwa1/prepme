@@ -35,7 +35,7 @@ def generate_presigned_url(file_key: str, expiration: int = 3600):
     try:
         url = s3_client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": AWS_S3_BUCKET, "Key": file_key"},
+            Params={"Bucket": AWS_S3_BUCKET, "Key": file_key},
             ExpiresIn=expiration,
         )
         return url
