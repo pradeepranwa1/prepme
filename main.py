@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Form
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import PyPDF2
@@ -15,14 +15,20 @@ from utils.s3_utils import upload_file_to_s3, check_file_in_s3
 from pydantic import BaseModel
 from utils.auth_utils import hash_password, verify_password, create_access_token, decode_access_token
 from datetime import timedelta
-from database import SessionLocal, User, get_db
+from database import SessionLocal, User, Book, get_db, Base, engine
 from sqlalchemy.orm import Session
+import warnings
 
 # Load environment variables
 load_dotenv()
 
 # Set tokenizers parallelism to false to avoid warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# Create database tables
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Book Q&A API")
 
@@ -48,6 +54,10 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+
+class BookUpload(BaseModel):
+    name: str
+    user_email: str
 
 # Initialize ChromaDB client
 chroma_client = chromadb.Client(Settings(
@@ -117,7 +127,12 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     token = create_access_token({"sub": user.username}, expires_delta=timedelta(minutes=30))
-    return {"access_token": token, "token_type": "bearer"}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "email": db_user.email,
+        "name": db_user.full_name
+    }
 
 @app.get("/protected")
 def protected_route(token: str = Depends(decode_access_token)):
@@ -127,9 +142,19 @@ def protected_route(token: str = Depends(decode_access_token)):
     return {"message": "You have access!", "user": token["sub"]}
 
 @app.post("/upload-book/")
-async def upload_book(file: UploadFile = File(...)):
+async def upload_book(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    user_email: str = Form(...),
+    db: Session = Depends(get_db)
+):
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    # Check if user exists
+    user = db.query(User).filter(User.email == user_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
     
     # Save the uploaded file
     file_path = UPLOAD_DIR / file.filename
@@ -139,7 +164,7 @@ async def upload_book(file: UploadFile = File(...)):
     if check_file_in_s3(f"books/{file.filename}"):
         raise HTTPException(status_code=400, detail="File already exists in S3")
 
-    # Upload file to S3 using utility function"""
+    # Upload file to S3 using utility function
     file_url = upload_file_to_s3(file.file, f"books/{file.filename}")
     
     # Process the PDF
@@ -175,11 +200,24 @@ async def upload_book(file: UploadFile = File(...)):
                 ids=[f"chunk_{i}"]
             )
         
+        # Create new book record in database
+        db_book = Book(
+            name=name,
+            filename=file.filename,
+            uploaded_by=user_email,
+            s3_url=file_url,
+            total_chunks=len(chunks)
+        )
+        db.add(db_book)
+        db.commit()
+        db.refresh(db_book)
+        
         return {
             "message": "Book processed successfully",
             "filename": file.filename,
             "total_chunks": len(chunks),
-            "url": file_url
+            "url": file_url,
+            "book_id": db_book.id
         }
     
     except Exception as e:
@@ -217,12 +255,30 @@ async def ask_question(book_name: str, question: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/list-books/")
-async def list_books():
+async def list_books(user_email: str, db: Session = Depends(get_db)):
     try:
-        # Get all collections (books)
+        # Get books for the specific user
+        books = db.query(Book).filter(Book.uploaded_by == user_email).all()
+        
+        # Get collections from ChromaDB
         collections = chroma_client.list_collections()
+        collection_names = [collection.name.replace("book_", "") for collection in collections]
+        
+        # Combine database and ChromaDB information
+        book_list = []
+        for book in books:
+            if book.filename.replace('.pdf', '') in collection_names:
+                book_list.append({
+                    "id": book.id,
+                    "name": book.name,
+                    "filename": book.filename,
+                    "upload_date": book.upload_date,
+                    "total_chunks": book.total_chunks,
+                    "s3_url": book.s3_url
+                })
+        
         return {
-            "books": [collection.name.replace("book_", "") for collection in collections]
+            "books": book_list
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

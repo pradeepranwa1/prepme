@@ -31,6 +31,17 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class Book(Base):
+    __tablename__ = "books"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    filename = Column(String, unique=True)
+    uploaded_by = Column(String, index=True)  # Will store user's email
+    upload_date = Column(DateTime, default=datetime.utcnow)
+    s3_url = Column(String)
+    total_chunks = Column(Integer)
+
 # create new table here for book statistics.
 
 
